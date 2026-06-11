@@ -464,7 +464,83 @@
   }
 
   .last-update { font-size: 11px; color: var(--text-light); white-space: nowrap; }
+
+  /* ── Firebase status indicator ── */
+  #fb-status {
+    position: fixed; bottom: 70px; right: 20px;
+    font-size: 11px; font-weight: 600;
+    padding: 4px 10px; border-radius: 20px;
+    z-index: 400; pointer-events: none;
+    transition: opacity 0.4s;
+  }
+  #fb-status.ok   { background: #D1FAE5; color: #059669; }
+  #fb-status.err  { background: #FEE2E2; color: #DC2626; }
+  #fb-status.sync { background: #DBEAFE; color: #2563EB; }
 </style>
+
+<!-- Firebase SDK (ESM via CDN) -->
+<script type="module">
+  import { initializeApp }                         from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAnalytics }                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
+  import {
+    getFirestore, collection,
+    doc, setDoc, deleteDoc,
+    onSnapshot, serverTimestamp
+  }                                                from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey:            "AIzaSyD7F3BEfGk5FxtxRFx1S-yt4j_spr6SM4g",
+    authDomain:        "account-manager-aa3c9.firebaseapp.com",
+    projectId:         "account-manager-aa3c9",
+    storageBucket:     "account-manager-aa3c9.firebasestorage.app",
+    messagingSenderId: "100494378829",
+    appId:             "1:100494378829:web:032644be9e95167d3ad904",
+    measurementId:     "G-R3V438CXZL"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  getAnalytics(app);
+  const db  = getFirestore(app);
+  const col = collection(db, "clients");
+
+  // ── Expose Firestore helpers to the global (classic) script below ──────────
+  window._fbSave = async (client) => {
+    fbStatus('sync', '⟳ Saving…');
+    const ref = doc(col, client.id);
+    await setDoc(ref, client);
+    fbStatus('ok', '✓ Saved');
+  };
+
+  window._fbDelete = async (id) => {
+    fbStatus('sync', '⟳ Deleting…');
+    await deleteDoc(doc(col, id));
+    fbStatus('ok', '✓ Deleted');
+  };
+
+  // Real-time listener: keeps local `clients` array in sync with Firestore
+  onSnapshot(col, (snap) => {
+    window.clients = snap.docs.map(d => d.data());
+    // Sort by lastUpdate desc by default so list is stable on first load
+    window.clients.sort((a, b) => new Date(b.lastUpdate||0) - new Date(a.lastUpdate||0));
+    if (typeof window.render === 'function') window.render();
+    fbStatus('ok', '● Live');
+  }, (err) => {
+    console.error('Firestore error', err);
+    fbStatus('err', '✗ Offline');
+  });
+
+  function fbStatus(type, msg) {
+    const el = document.getElementById('fb-status');
+    if (!el) return;
+    el.className = type;
+    el.textContent = msg;
+    el.style.opacity = '1';
+    if (type === 'ok') {
+      clearTimeout(window._fbTimer);
+      window._fbTimer = setTimeout(() => { el.style.opacity = '0.4'; }, 3000);
+    }
+  }
+</script>
 </head>
 <body>
 
@@ -663,25 +739,31 @@
 <!-- Toast -->
 <div class="toast-container" id="toastContainer"></div>
 
+<!-- Firebase status pill -->
+<div id="fb-status" class="sync">⟳ Connecting…</div>
+
 <script>
 // ═══════════════════════════════════════════════
 // DATA LAYER
 // ═══════════════════════════════════════════════
 
-const STORAGE_KEY = 'acm_clients_v1';
+// clients[] is kept in sync by the Firestore onSnapshot listener (see <script type="module"> above).
+// All existing code below works unchanged.
 let clients = [];
 let currentHistoryId = null;
 let deleteTargetId = null;
 let activeStatFilter = '';
 
 function loadData() {
-  try {
-    clients = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-  } catch(e) { clients = []; }
+  // No-op: data arrives via Firestore real-time listener.
 }
 
-function saveData() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(clients));
+async function saveData() {
+  // Persist mutations to Firestore. Each call is triggered after add/edit/delete/note.
+  for (const c of clients) {
+    try { if (window._fbSave) await window._fbSave(c); }
+    catch(e) { console.error('Firebase save error', e); }
+  }
 }
 
 function genId() {
@@ -945,10 +1027,12 @@ function saveClient() {
     lastUpdate: now(),
   };
 
+  let savedClient;
   if (isNew) {
     const client = { id: genId(), created: now(), history: [], ...data };
     client.history.push({ ts: now(), text: 'Client added.' });
     clients.unshift(client);
+    savedClient = client;
     toast('Client added ✓');
   } else {
     const idx = clients.findIndex(c => c.id === id);
@@ -963,10 +1047,12 @@ function saveClient() {
       clients[idx].history = clients[idx].history || [];
       clients[idx].history.push({ ts: now(), text: changes.join(' · ') });
     }
+    savedClient = clients[idx];
     toast('Client updated ✓');
   }
 
-  saveData();
+  // Save only this one document to Firestore
+  if (window._fbSave && savedClient) window._fbSave(savedClient).catch(console.error);
   closeDrawer();
   render();
 }
@@ -1016,7 +1102,7 @@ function addHistoryNote() {
   clients[idx].history = clients[idx].history || [];
   clients[idx].history.push({ ts: now(), text });
   clients[idx].lastUpdate = now();
-  saveData();
+  if (window._fbSave) window._fbSave(clients[idx]).catch(console.error);
   document.getElementById('newNoteText').value = '';
   renderHistoryList(clients[idx]);
   render();
@@ -1031,7 +1117,7 @@ function markFollowupDone() {
   clients[idx].lastUpdate = now();
   clients[idx].history = clients[idx].history || [];
   clients[idx].history.push({ ts: now(), text: `Follow-up completed (was ${fmtDate(old+'T00:00:00')}).` });
-  saveData();
+  if (window._fbSave) window._fbSave(clients[idx]).catch(console.error);
   document.getElementById('followupCompleteBtn').style.display = 'none';
   renderHistoryList(clients[idx]);
   render();
@@ -1065,8 +1151,9 @@ function closeConfirm() {
 
 function confirmDelete() {
   if (!deleteTargetId) return;
-  clients = clients.filter(c => c.id !== deleteTargetId);
-  saveData();
+  const idToDelete = deleteTargetId;
+  clients = clients.filter(c => c.id !== idToDelete);
+  if (window._fbDelete) window._fbDelete(idToDelete).catch(console.error);
   closeConfirm();
   render();
   toast('Client deleted');
