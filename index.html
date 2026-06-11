@@ -479,6 +479,7 @@
 </style>
 
 <!-- Firebase SDK (ESM via CDN) -->
+<script>window._clientsArray = [];</script>
 <script type="module">
   import { initializeApp }                         from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
   import { getAnalytics }                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
@@ -519,9 +520,11 @@
 
   // Real-time listener: keeps local `clients` array in sync with Firestore
   onSnapshot(col, (snap) => {
-    window.clients = snap.docs.map(d => d.data());
-    // Sort by lastUpdate desc by default so list is stable on first load
-    window.clients.sort((a, b) => new Date(b.lastUpdate||0) - new Date(a.lastUpdate||0));
+    const incoming = snap.docs.map(d => d.data());
+    incoming.sort((a, b) => new Date(b.lastUpdate||0) - new Date(a.lastUpdate||0));
+    // Splice into the shared array so the classic script's `clients` reference stays valid
+    window._clientsArray.length = 0;
+    incoming.forEach(c => window._clientsArray.push(c));
     if (typeof window.render === 'function') window.render();
     fbStatus('ok', '● Live');
   }, (err) => {
@@ -747,9 +750,10 @@
 // DATA LAYER
 // ═══════════════════════════════════════════════
 
-// clients[] is kept in sync by the Firestore onSnapshot listener (see <script type="module"> above).
-// All existing code below works unchanged.
-let clients = [];
+// clients[] is the shared array kept in sync by the Firestore onSnapshot listener above.
+// We point our local variable at the same array object so all mutations are visible to onSnapshot.
+window._clientsArray = window._clientsArray || [];
+let clients = window._clientsArray;
 let currentHistoryId = null;
 let deleteTargetId = null;
 let activeStatFilter = '';
@@ -1152,7 +1156,9 @@ function closeConfirm() {
 function confirmDelete() {
   if (!deleteTargetId) return;
   const idToDelete = deleteTargetId;
-  clients = clients.filter(c => c.id !== idToDelete);
+  const filtered = clients.filter(c => c.id !== idToDelete);
+  clients.length = 0;
+  filtered.forEach(c => clients.push(c));
   if (window._fbDelete) window._fbDelete(idToDelete).catch(console.error);
   closeConfirm();
   render();
