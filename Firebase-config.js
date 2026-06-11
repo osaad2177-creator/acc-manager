@@ -7,13 +7,13 @@ import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebas
 import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
 
 const firebaseConfig = {
-  apiKey:            "AIzaSyD7F3BEfGk5FxtxRFx1S-yt4j_spr6SM4g",
-  authDomain:        "account-manager-aa3c9.firebaseapp.com",
-  projectId:         "account-manager-aa3c9",
-  storageBucket:     "account-manager-aa3c9.firebasestorage.app",
+  apiKey: "AIzaSyD7F3BEfGk5FxtxRFx1S-yt4j_spr6SM4g",
+  authDomain: "account-manager-aa3c9.firebaseapp.com",
+  projectId: "account-manager-aa3c9",
+  storageBucket: "account-manager-aa3c9.firebasestorage.app",
   messagingSenderId: "100494378829",
-  appId:             "1:100494378829:web:032644be9e95167d3ad904",
-  measurementId:     "G-R3V438CXZL"
+  appId: "1:100494378829:web:032644be9e95167d3ad904",
+  measurementId: "G-R3V438CXZL"
 };
 
 const app       = initializeApp(firebaseConfig);
