@@ -476,60 +476,221 @@
   #fb-status.ok   { background: #D1FAE5; color: #059669; }
   #fb-status.err  { background: #FEE2E2; color: #DC2626; }
   #fb-status.sync { background: #DBEAFE; color: #2563EB; }
+
+  /* ── Login screen ── */
+  .login-screen {
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 30% 20%, var(--navy-mid), var(--navy) 70%);
+    padding: 20px;
+  }
+  .login-card {
+    background: var(--surface);
+    border-radius: 16px;
+    padding: 36px 32px;
+    width: 100%; max-width: 380px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  }
+  .login-logo {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 700; font-size: 18px; margin-bottom: 6px;
+  }
+  .login-logo .header-logo-icon { width: 32px; height: 32px; font-size: 16px; }
+  .login-sub { font-size: 13px; color: var(--text-mid); margin-bottom: 26px; }
+  .login-form .form-group { margin-bottom: 14px; }
+  .login-error {
+    background: #FEE2E2; color: #DC2626;
+    font-size: 12.5px; font-weight: 500;
+    padding: 9px 12px; border-radius: 8px;
+    margin-bottom: 14px; display: none;
+  }
+  .login-error.show { display: block; }
+  .login-submit { width: 100%; justify-content: center; padding: 10px 14px; font-size: 13.5px; margin-top: 4px; }
+
+  /* ── Header user area ── */
+  .user-chip {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.16);
+    padding: 5px 6px 5px 10px;
+    border-radius: 100px;
+    font-size: 12.5px;
+  }
+  .user-chip .user-avatar {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: white; flex-shrink: 0;
+  }
+  .user-chip .user-role {
+    font-size: 10px; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.4px;
+  }
+
+  /* ── Created-by hint under client name ── */
+  .created-by { font-size: 11px; color: var(--text-light); margin-top: 2px; }
+
+  /* ── History / activity author line ── */
+  .history-author { font-size: 12px; font-weight: 700; color: var(--blue); margin-bottom: 1px; }
+
+  /* ── Activity log ── */
+  .activity-filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .activity-item {
+    display: flex; gap: 10px; padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .activity-item:last-child { border-bottom: none; }
+  .activity-avatar {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--blue-light); color: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; flex-shrink: 0;
+  }
+  .activity-text { font-size: 13px; color: var(--text); }
+  .activity-text b { font-weight: 700; }
+  .activity-time { font-size: 11px; color: var(--text-light); margin-top: 1px; }
+  .activity-empty { text-align: center; color: var(--text-light); padding: 24px 0; font-size: 13px; }
 </style>
 
 <!-- Firebase SDK (ESM via CDN) -->
-<script>window._clientsArray = [];</script>
+<script>
+  window._clientsArray = [];
+  window._activitiesArray = [];
+  window._currentUser = null; // { uid, name, email, role }
+</script>
 <script type="module">
-  import { initializeApp }                         from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getAnalytics }                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
+  import { app, db, auth } from './firebase-config.js';
   import {
-    getFirestore, collection,
-    doc, setDoc, deleteDoc,
-    onSnapshot, serverTimestamp
-  }                                                from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    collection, doc, setDoc, deleteDoc,
+    onSnapshot, addDoc, getDoc,
+    query, orderBy, limit
+  } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import {
+    onAuthStateChanged, signInWithEmailAndPassword, signOut
+  } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
-  const firebaseConfig = {
-    apiKey:            "AIzaSyD7F3BEfGk5FxtxRFx1S-yt4j_spr6SM4g",
-    authDomain:        "account-manager-aa3c9.firebaseapp.com",
-    projectId:         "account-manager-aa3c9",
-    storageBucket:     "account-manager-aa3c9.firebasestorage.app",
-    messagingSenderId: "100494378829",
-    appId:             "1:100494378829:web:032644be9e95167d3ad904",
-    measurementId:     "G-R3V438CXZL"
+  const clientsCol    = collection(db, "clients");
+  const usersCol      = collection(db, "users");
+  const activitiesCol = collection(db, "activities");
+
+  let unsubClients    = null;
+  let unsubActivities = null;
+
+  // ── Auth: login / logout, exposed to the classic script ────────────────────
+  window._fbLogin = async (email, password) => {
+    return signInWithEmailAndPassword(auth, email, password);
   };
 
-  const app = initializeApp(firebaseConfig);
-  getAnalytics(app);
-  const db  = getFirestore(app);
-  const col = collection(db, "clients");
+  window._fbLogout = async () => {
+    return signOut(auth);
+  };
 
-  // ── Expose Firestore helpers to the global (classic) script below ──────────
+  // ── Firestore helpers, exposed to the classic script ───────────────────────
   window._fbSave = async (client) => {
     fbStatus('sync', '⟳ Saving…');
-    const ref = doc(col, client.id);
+    const ref = doc(clientsCol, client.id);
     await setDoc(ref, client);
     fbStatus('ok', '✓ Saved');
   };
 
   window._fbDelete = async (id) => {
     fbStatus('sync', '⟳ Deleting…');
-    await deleteDoc(doc(col, id));
+    await deleteDoc(doc(clientsCol, id));
     fbStatus('ok', '✓ Deleted');
   };
 
-  // Real-time listener: keeps local `clients` array in sync with Firestore
-  onSnapshot(col, (snap) => {
-    const incoming = snap.docs.map(d => d.data());
-    incoming.sort((a, b) => new Date(b.lastUpdate||0) - new Date(a.lastUpdate||0));
-    // Splice into the shared array so the classic script's `clients` reference stays valid
+  window._fbLogActivity = async (activity) => {
+    try {
+      await addDoc(activitiesCol, { ...activity, ts: activity.ts || Date.now() });
+    } catch (e) {
+      console.error('Activity log error', e);
+    }
+  };
+
+  function startClientsListener() {
+    if (unsubClients) return;
+    unsubClients = onSnapshot(clientsCol, (snap) => {
+      const incoming = snap.docs.map(d => d.data());
+      incoming.sort((a, b) => new Date(b.lastUpdate||0) - new Date(a.lastUpdate||0));
+      window._clientsArray.length = 0;
+      incoming.forEach(c => window._clientsArray.push(c));
+      if (typeof window.render === 'function') window.render();
+      fbStatus('ok', '● Live');
+    }, (err) => {
+      console.error('Firestore error', err);
+      fbStatus('err', '✗ Offline');
+      if (typeof window.showFatalError === 'function' && err.code === 'permission-denied') {
+        window.showFatalError('You do not have permission to view client data.');
+      }
+    });
+  }
+
+  function startActivitiesListener() {
+    if (unsubActivities) return;
+    // Only the Manager can read this collection (enforced by security rules too).
+    try {
+      const q = query(activitiesCol, orderBy('ts', 'desc'), limit(300));
+      unsubActivities = onSnapshot(q, (snap) => {
+        window._activitiesArray.length = 0;
+        snap.docs.forEach(d => window._activitiesArray.push({ id: d.id, ...d.data() }));
+        if (typeof window.renderActivityLog === 'function') window.renderActivityLog();
+      }, (err) => {
+        console.error('Activity log listener error', err);
+      });
+    } catch (e) { console.error(e); }
+  }
+
+  function stopListeners() {
+    if (unsubClients) { unsubClients(); unsubClients = null; }
+    if (unsubActivities) { unsubActivities(); unsubActivities = null; }
     window._clientsArray.length = 0;
-    incoming.forEach(c => window._clientsArray.push(c));
-    if (typeof window.render === 'function') window.render();
-    fbStatus('ok', '● Live');
-  }, (err) => {
-    console.error('Firestore error', err);
-    fbStatus('err', '✗ Offline');
+    window._activitiesArray.length = 0;
+  }
+
+  // ── Auth state watcher: drives login screen vs. app screen ────────────────
+  onAuthStateChanged(auth, async (user) => {
+    if (!user) {
+      window._currentUser = null;
+      stopListeners();
+      if (typeof window.showLoginScreen === 'function') window.showLoginScreen();
+      return;
+    }
+
+    try {
+      const profileSnap = await getDoc(doc(usersCol, user.uid));
+      if (!profileSnap.exists()) {
+        if (typeof window.showLoginError === 'function') {
+          window.showLoginError('Your account has no profile set up yet. Ask the Manager to add you in Firestore → users.');
+        }
+        await signOut(auth);
+        return;
+      }
+      const profile = profileSnap.data();
+      if (profile.active === false) {
+        if (typeof window.showLoginError === 'function') {
+          window.showLoginError('This account has been disabled.');
+        }
+        await signOut(auth);
+        return;
+      }
+
+      window._currentUser = {
+        uid: user.uid,
+        name: profile.name || user.email,
+        email: user.email,
+        role: profile.role === 'manager' ? 'manager' : 'team_member'
+      };
+
+      startClientsListener();
+      if (window._currentUser.role === 'manager') startActivitiesListener();
+
+      if (typeof window.showAppScreen === 'function') window.showAppScreen();
+    } catch (e) {
+      console.error('Profile load error', e);
+      if (typeof window.showLoginError === 'function') {
+        window.showLoginError('Could not load your profile. Please try again.');
+      }
+      await signOut(auth);
+    }
   });
 
   function fbStatus(type, msg) {
@@ -547,14 +708,49 @@
 </head>
 <body>
 
+<!-- Login Screen -->
+<div class="login-screen" id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="header-logo-icon" style="color:white;">📋</div>
+      <span>Account Manager</span>
+    </div>
+    <div class="login-sub">Sign in to continue</div>
+    <div class="login-error" id="loginError"></div>
+    <form class="login-form" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" class="form-control" id="loginEmail" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" class="form-control" id="loginPassword" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn btn-primary login-submit" id="loginSubmitBtn">Sign In</button>
+    </form>
+  </div>
+</div>
+
+<!-- Main App (hidden until authenticated) -->
+<div id="appShell" style="display:none;">
+
 <div class="header">
   <div class="header-logo">
     <div class="header-logo-icon">📋</div>
     <span>Account Manager</span>
   </div>
   <div class="header-actions">
+    <div class="user-chip" id="userChip">
+      <div class="user-avatar" id="userAvatar">?</div>
+      <div>
+        <div id="userName">—</div>
+        <div class="user-role" id="userRole"></div>
+      </div>
+    </div>
+    <button class="btn btn-secondary" id="activityLogBtn" style="display:none;" onclick="openActivityLog()">🕒 Activity Log</button>
     <button class="btn btn-secondary" onclick="exportData()">⬇ Export</button>
     <button class="btn btn-primary" onclick="openDrawer(null)">+ New Client</button>
+    <button class="btn btn-ghost" onclick="handleLogout()">Logout</button>
   </div>
 </div>
 
@@ -713,6 +909,7 @@
       <button class="modal-close" onclick="closeHistory()">×</button>
     </div>
     <div class="modal-body">
+      <div class="created-by" id="historyCreatedBy" style="margin-bottom:10px;font-size:12px;"></div>
       <div id="historyList"></div>
       <div class="add-note-area">
         <div style="font-size:12px;font-weight:600;color:var(--text-mid);margin-bottom:6px;">Add a note</div>
@@ -739,11 +936,43 @@
   </div>
 </div>
 
+<!-- Activity Log Modal (Manager only) -->
+<div class="modal-overlay" id="activityOverlay" onclick="closeActivityLog(event)">
+  <div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
+    <div class="modal-header">
+      <h3>Activity Log</h3>
+      <button class="modal-close" onclick="closeActivityLog()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="activity-filters">
+        <select class="filter-select" id="activityUserFilter" onchange="renderActivityLog()">
+          <option value="">All Users</option>
+          <option value="Manager">Manager</option>
+          <option value="Noor">Noor</option>
+          <option value="Hussein">Hussein</option>
+        </select>
+        <select class="filter-select" id="activityActionFilter" onchange="renderActivityLog()">
+          <option value="">All Actions</option>
+          <option value="created">Client Added</option>
+          <option value="updated">Client Updated</option>
+          <option value="note">Note Added</option>
+          <option value="followup_completed">Follow-up Completed</option>
+          <option value="deleted">Client Deleted</option>
+        </select>
+        <input type="date" class="filter-select" id="activityDateFilter" onchange="renderActivityLog()">
+      </div>
+      <div id="activityList"></div>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast-container" id="toastContainer"></div>
 
 <!-- Firebase status pill -->
 <div id="fb-status" class="sync">⟳ Connecting…</div>
+
+</div><!-- /#appShell -->
 
 <script>
 // ═══════════════════════════════════════════════
@@ -761,6 +990,112 @@ let activeStatFilter = '';
 function loadData() {
   // No-op: data arrives via Firestore real-time listener.
 }
+
+// ═══════════════════════════════════════════════
+// AUTH / LOGIN / LOGOUT
+// ═══════════════════════════════════════════════
+
+function currentUser() {
+  return window._currentUser; // { uid, name, email, role } or null
+}
+
+function isManager() {
+  const u = currentUser();
+  return !!u && u.role === 'manager';
+}
+
+function showLoginScreen() {
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('appShell').style.display = 'none';
+  const btn = document.getElementById('loginSubmitBtn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
+}
+
+function showAppScreen() {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appShell').style.display = 'block';
+  hideLoginError();
+  document.getElementById('loginEmail').value = '';
+  document.getElementById('loginPassword').value = '';
+  applyUserToHeader();
+  applyPermissions();
+  render();
+}
+
+function showLoginError(msg) {
+  const el = document.getElementById('loginError');
+  el.textContent = msg;
+  el.classList.add('show');
+  const btn = document.getElementById('loginSubmitBtn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
+}
+
+function hideLoginError() {
+  const el = document.getElementById('loginError');
+  el.classList.remove('show');
+  el.textContent = '';
+}
+
+function friendlyAuthError(err) {
+  const code = (err && err.code) || '';
+  if (code.includes('invalid-credential') || code.includes('wrong-password') || code.includes('user-not-found') || code.includes('invalid-email')) {
+    return 'Incorrect email or password.';
+  }
+  if (code.includes('user-disabled')) return 'This account has been disabled.';
+  if (code.includes('too-many-requests')) return 'Too many attempts. Please wait a moment and try again.';
+  if (code.includes('network-request-failed')) return 'Connection problem. Check your internet and try again.';
+  return 'Could not sign in. Please try again.';
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  hideLoginError();
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  if (!email || !password) return;
+  const btn = document.getElementById('loginSubmitBtn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    if (!window._fbLogin) throw new Error('Auth not ready');
+    await window._fbLogin(email, password);
+    // showAppScreen() is triggered by onAuthStateChanged in the module script.
+  } catch (err) {
+    console.error('Login error', err);
+    showLoginError(friendlyAuthError(err));
+  }
+}
+
+async function handleLogout() {
+  try {
+    if (window._fbLogout) await window._fbLogout();
+  } catch (err) {
+    console.error('Logout error', err);
+  }
+}
+
+function applyUserToHeader() {
+  const u = currentUser();
+  if (!u) return;
+  document.getElementById('userName').textContent = u.name;
+  document.getElementById('userRole').textContent = u.role === 'manager' ? 'Manager' : 'Team Member';
+  document.getElementById('userAvatar').textContent = (u.name || '?').trim().charAt(0).toUpperCase();
+}
+
+function applyPermissions() {
+  const manager = isManager();
+  const activityBtn = document.getElementById('activityLogBtn');
+  if (activityBtn) activityBtn.style.display = manager ? 'inline-flex' : 'none';
+}
+
+function showFatalError(msg) {
+  toast(msg);
+}
+
+// Wire up auth screen callbacks used by the Firebase module script
+window.showLoginScreen = showLoginScreen;
+window.showAppScreen = showAppScreen;
+window.showLoginError = showLoginError;
+window.showFatalError = showFatalError;
 
 async function saveData() {
   // Persist mutations to Firestore. Each call is triggered after add/edit/delete/note.
@@ -935,12 +1270,15 @@ function render() {
     return;
   }
 
+  const manager = isManager();
   tbody.innerHTML = list.map(c => {
     const flCls = followupClass(c.followup);
+    const creatorLabel = c.createdByName ? `by ${c.createdByName}` : 'Existing Record';
     return `<tr>
       <td>
         <div class="client-name">${esc(c.name)}</div>
         <div class="company-name">${esc(c.company||'')}</div>
+        <div class="created-by">${esc(creatorLabel)}</div>
       </td>
       <td>
         <div class="contact-info">${esc(c.contact||'')}</div>
@@ -961,7 +1299,7 @@ function render() {
         <div class="actions-cell">
           <button class="icon-btn history" title="History & Notes" onclick="openHistory('${c.id}')">📝</button>
           <button class="icon-btn" title="Edit" onclick="openDrawer('${c.id}')">✏️</button>
-          <button class="icon-btn delete" title="Delete" onclick="askDelete('${c.id}')">🗑</button>
+          ${manager ? `<button class="icon-btn delete" title="Delete" onclick="askDelete('${c.id}')">🗑</button>` : ''}
         </div>
       </td>
     </tr>`;
@@ -1014,6 +1352,9 @@ function saveClient() {
   const name = document.getElementById('f_name').value.trim();
   if (!name) { toast('Client name is required'); document.getElementById('f_name').focus(); return; }
 
+  const u = currentUser();
+  if (!u) { toast('You must be signed in.'); return; }
+
   const id = document.getElementById('editId').value;
   const isNew = !id;
 
@@ -1029,15 +1370,22 @@ function saveClient() {
     followup: document.getElementById('f_followup').value,
     notes:    document.getElementById('f_notes').value.trim(),
     lastUpdate: now(),
+    updatedBy: u.uid,
+    updatedByName: u.name,
+    updatedAt: now(),
   };
 
   let savedClient;
   if (isNew) {
-    const client = { id: genId(), created: now(), history: [], ...data };
-    client.history.push({ ts: now(), text: 'Client added.' });
+    const client = {
+      id: genId(), created: now(), history: [], ...data,
+      createdBy: u.uid, createdByName: u.name, createdAt: now(),
+    };
+    client.history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'created', text: 'Client added.' });
     clients.unshift(client);
     savedClient = client;
     toast('Client added ✓');
+    logActivity('created', client.id, client.name, `Added client ${client.name}${client.company ? ' (' + client.company + ')' : ''}.`);
   } else {
     const idx = clients.findIndex(c => c.id === id);
     if (idx === -1) return;
@@ -1046,19 +1394,43 @@ function saveClient() {
     if (old.status !== data.status) changes.push(`Status → ${data.status}`);
     if (old.deal !== data.deal) changes.push(`Deal → ${data.deal}`);
     if (old.followup !== data.followup && data.followup) changes.push(`Follow-up set: ${fmtDate(data.followup+'T00:00:00')}`);
-    clients[idx] = { ...old, ...data };
+    // Preserve the original creator fields — never let the frontend overwrite who created the record.
+    clients[idx] = {
+      ...old, ...data,
+      createdBy: old.createdBy, createdByName: old.createdByName, createdAt: old.createdAt,
+    };
     if (changes.length) {
       clients[idx].history = clients[idx].history || [];
-      clients[idx].history.push({ ts: now(), text: changes.join(' · ') });
+      clients[idx].history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'updated', text: changes.join(' · ') });
     }
     savedClient = clients[idx];
     toast('Client updated ✓');
+    logActivity('updated', savedClient.id, savedClient.name, changes.length ? `Updated ${savedClient.name}: ${changes.join(' · ')}` : `Updated ${savedClient.name}.`);
   }
 
   // Save only this one document to Firestore
   if (window._fbSave && savedClient) window._fbSave(savedClient).catch(console.error);
   closeDrawer();
   render();
+}
+
+// ═══════════════════════════════════════════════
+// ACTIVITY LOG (write side)
+// ═══════════════════════════════════════════════
+
+function logActivity(action, clientId, clientName, text) {
+  const u = currentUser();
+  if (!u || !window._fbLogActivity) return;
+  window._fbLogActivity({
+    userId: u.uid,
+    userName: u.name,
+    userRole: u.role,
+    action,
+    clientId: clientId || '',
+    clientName: clientName || '',
+    text,
+    ts: Date.now(),
+  }).catch(console.error);
 }
 
 // ═══════════════════════════════════════════════
@@ -1071,6 +1443,8 @@ function openHistory(id) {
   if (!c) return;
   document.getElementById('historyTitle').textContent = `History: ${c.name}`;
   document.getElementById('newNoteText').value = '';
+  const createdByEl = document.getElementById('historyCreatedBy');
+  createdByEl.textContent = c.createdByName ? `Created by ${c.createdByName}` : 'Existing Record — creator unavailable';
   renderHistoryList(c);
 
   const btn = document.getElementById('followupCompleteBtn');
@@ -1092,6 +1466,7 @@ function renderHistoryList(c) {
     : hist.map(h => `<div class="history-item">
         <div class="history-dot"></div>
         <div>
+          ${h.userName ? `<div class="history-author">${esc(h.userName)}</div>` : ''}
           <div class="history-desc">${esc(h.text)}</div>
           <div class="history-time">${fmtDateTime(h.ts)}</div>
         </div>
@@ -1101,31 +1476,44 @@ function renderHistoryList(c) {
 function addHistoryNote() {
   const text = document.getElementById('newNoteText').value.trim();
   if (!text) return;
+  const u = currentUser();
+  if (!u) { toast('You must be signed in.'); return; }
   const idx = clients.findIndex(c => c.id === currentHistoryId);
   if (idx === -1) return;
   clients[idx].history = clients[idx].history || [];
-  clients[idx].history.push({ ts: now(), text });
+  clients[idx].history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'note', text });
   clients[idx].lastUpdate = now();
+  clients[idx].updatedBy = u.uid;
+  clients[idx].updatedByName = u.name;
+  clients[idx].updatedAt = now();
   if (window._fbSave) window._fbSave(clients[idx]).catch(console.error);
   document.getElementById('newNoteText').value = '';
   renderHistoryList(clients[idx]);
   render();
   toast('Note added ✓');
+  logActivity('note', clients[idx].id, clients[idx].name, `Note on ${clients[idx].name}: ${text}`);
 }
 
 function markFollowupDone() {
+  const u = currentUser();
+  if (!u) { toast('You must be signed in.'); return; }
   const idx = clients.findIndex(c => c.id === currentHistoryId);
   if (idx === -1) return;
   const old = clients[idx].followup;
   clients[idx].followup = '';
   clients[idx].lastUpdate = now();
+  clients[idx].updatedBy = u.uid;
+  clients[idx].updatedByName = u.name;
+  clients[idx].updatedAt = now();
   clients[idx].history = clients[idx].history || [];
-  clients[idx].history.push({ ts: now(), text: `Follow-up completed (was ${fmtDate(old+'T00:00:00')}).` });
+  const text = `Follow-up completed (was ${fmtDate(old+'T00:00:00')}).`;
+  clients[idx].history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'followup_completed', text });
   if (window._fbSave) window._fbSave(clients[idx]).catch(console.error);
   document.getElementById('followupCompleteBtn').style.display = 'none';
   renderHistoryList(clients[idx]);
   render();
   toast('Follow-up marked done ✓');
+  logActivity('followup_completed', clients[idx].id, clients[idx].name, `Marked follow-up done for ${clients[idx].name}.`);
 }
 
 function closeHistory(e) {
@@ -1140,6 +1528,7 @@ function closeHistory(e) {
 // ═══════════════════════════════════════════════
 
 function askDelete(id) {
+  if (!isManager()) { toast('Only the Manager can delete clients.'); return; }
   deleteTargetId = id;
   const c = clients.find(x => x.id === id);
   document.getElementById('confirmMsg').textContent = `Delete "${c ? c.name : 'this client'}"? This cannot be undone.`;
@@ -1155,7 +1544,9 @@ function closeConfirm() {
 
 function confirmDelete() {
   if (!deleteTargetId) return;
+  if (!isManager()) { toast('Only the Manager can delete clients.'); closeConfirm(); return; }
   const idToDelete = deleteTargetId;
+  const target = clients.find(c => c.id === idToDelete);
   const filtered = clients.filter(c => c.id !== idToDelete);
   clients.length = 0;
   filtered.forEach(c => clients.push(c));
@@ -1163,6 +1554,7 @@ function confirmDelete() {
   closeConfirm();
   render();
   toast('Client deleted');
+  if (target) logActivity('deleted', idToDelete, target.name, `Deleted client ${target.name}.`);
 }
 
 // ═══════════════════════════════════════════════
@@ -1195,6 +1587,71 @@ function exportData() {
 }
 
 // ═══════════════════════════════════════════════
+// ACTIVITY LOG (read / UI side, Manager only)
+// ═══════════════════════════════════════════════
+
+function openActivityLog() {
+  if (!isManager()) { toast('Only the Manager can view the activity log.'); return; }
+  document.getElementById('activityOverlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+  renderActivityLog();
+}
+
+function closeActivityLog(e) {
+  if (e && e.target !== document.getElementById('activityOverlay')) return;
+  document.getElementById('activityOverlay').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+const ACTION_LABELS = {
+  created: 'added client',
+  updated: 'updated',
+  note: 'added a note on',
+  followup_completed: 'completed follow-up for',
+  deleted: 'deleted client',
+};
+
+function renderActivityLog() {
+  const listEl = document.getElementById('activityList');
+  if (!listEl) return; // modal not in DOM yet / not relevant
+
+  const userFilter = document.getElementById('activityUserFilter').value;
+  const actionFilter = document.getElementById('activityActionFilter').value;
+  const dateFilter = document.getElementById('activityDateFilter').value;
+
+  let items = (window._activitiesArray || []).slice();
+
+  if (userFilter) items = items.filter(a => a.userName === userFilter);
+  if (actionFilter) items = items.filter(a => a.action === actionFilter);
+  if (dateFilter) {
+    items = items.filter(a => {
+      const d = new Date(a.ts);
+      const iso = d.toISOString().slice(0, 10);
+      return iso === dateFilter;
+    });
+  }
+
+  if (items.length === 0) {
+    listEl.innerHTML = '<div class="activity-empty">No activity found for these filters.</div>';
+    return;
+  }
+
+  listEl.innerHTML = items.map(a => {
+    const initial = (a.userName || '?').trim().charAt(0).toUpperCase();
+    const actionLabel = ACTION_LABELS[a.action] || a.action;
+    return `<div class="activity-item">
+      <div class="activity-avatar">${esc(initial)}</div>
+      <div>
+        <div class="activity-text"><b>${esc(a.userName || 'Unknown')}</b> ${esc(actionLabel)}${a.clientName ? ' <b>' + esc(a.clientName) + '</b>' : ''}</div>
+        <div class="activity-time">${fmtDateTime(a.ts)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+window.renderActivityLog = renderActivityLog;
+
+// ═══════════════════════════════════════════════
 // TOAST
 // ═══════════════════════════════════════════════
 
@@ -1213,6 +1670,7 @@ function toast(msg) {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('confirmOverlay').classList.contains('open')) { closeConfirm(); return; }
+    if (document.getElementById('activityOverlay').classList.contains('open')) { closeActivityLog({target: document.getElementById('activityOverlay')}); return; }
     if (document.getElementById('historyOverlay').classList.contains('open')) { closeHistory({target: document.getElementById('historyOverlay')}); return; }
     if (document.getElementById('drawer').classList.contains('open')) { closeDrawer(); return; }
   }
