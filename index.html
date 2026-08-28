@@ -566,8 +566,29 @@
     query, orderBy, limit, where
   } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
   import {
-    onAuthStateChanged, signInWithEmailAndPassword, signOut
+    onAuthStateChanged, signInWithEmailAndPassword, signOut,
+    setPersistence, browserLocalPersistence, browserSessionPersistence, inMemoryPersistence
   } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+  // ── Persistence: make sure a signed-in session survives a page refresh ────
+  // Firebase defaults to local (IndexedDB) persistence, but that write can
+  // fail silently in some environments — most commonly when this file is
+  // opened directly as file://index.html instead of served over http(s).
+  // We set it explicitly and fall back gracefully instead of failing silent.
+  let authReady = (async () => {
+    try {
+      await setPersistence(auth, browserLocalPersistence);
+    } catch (e) {
+      console.warn('browserLocalPersistence unavailable, falling back to session persistence:', e);
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+      } catch (e2) {
+        console.warn('browserSessionPersistence unavailable either, session will not survive a refresh:', e2);
+        try { await setPersistence(auth, inMemoryPersistence); } catch (e3) { console.error(e3); }
+        if (typeof window.showLoginPersistenceWarning === 'function') window.showLoginPersistenceWarning();
+      }
+    }
+  })();
 
   const clientsCol    = collection(db, "clients");
   const usersCol      = collection(db, "users");
@@ -579,6 +600,7 @@
 
   // ── Auth: login / logout, exposed to the classic script ────────────────────
   window._fbLogin = async (email, password) => {
+    await authReady;
     return signInWithEmailAndPassword(auth, email, password);
   };
 
@@ -589,15 +611,37 @@
   // ── Firestore helpers, exposed to the classic script ───────────────────────
   window._fbSave = async (client) => {
     fbStatus('sync', '⟳ Saving…');
-    const ref = doc(clientsCol, client.id);
-    await setDoc(ref, client);
-    fbStatus('ok', '✓ Saved');
+    try {
+      const ref = doc(clientsCol, client.id);
+      await setDoc(ref, client);
+      fbStatus('ok', '✓ Saved');
+    } catch (err) {
+      console.error('Save error', err);
+      fbStatus('err', err.code === 'permission-denied' ? '✗ Permission denied' : '✗ Save failed');
+      if (typeof window.showFatalError === 'function') {
+        window.showFatalError(err.code === 'permission-denied'
+          ? 'Could not save — you do not have permission to edit this client.'
+          : 'Could not save. Check your connection and try again.');
+      }
+      throw err;
+    }
   };
 
   window._fbDelete = async (id) => {
     fbStatus('sync', '⟳ Deleting…');
-    await deleteDoc(doc(clientsCol, id));
-    fbStatus('ok', '✓ Deleted');
+    try {
+      await deleteDoc(doc(clientsCol, id));
+      fbStatus('ok', '✓ Deleted');
+    } catch (err) {
+      console.error('Delete error', err);
+      fbStatus('err', err.code === 'permission-denied' ? '✗ Permission denied' : '✗ Delete failed');
+      if (typeof window.showFatalError === 'function') {
+        window.showFatalError(err.code === 'permission-denied'
+          ? 'Could not delete — you do not have permission.'
+          : 'Could not delete. Check your connection and try again.');
+      }
+      throw err;
+    }
   };
 
   window._fbLogActivity = async (activity) => {
@@ -1072,6 +1116,14 @@ function showLoginError(msg) {
   const btn = document.getElementById('loginSubmitBtn');
   if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
 }
+
+function showLoginPersistenceWarning() {
+  const el = document.getElementById('loginError');
+  if (!el) return;
+  el.textContent = "Your browser is blocking sign-in storage (private/incognito mode, or the page was opened as a file:// path). You'll need to sign in again after every refresh until this is fixed.";
+  el.classList.add('show');
+}
+window.showLoginPersistenceWarning = showLoginPersistenceWarning;
 
 function hideLoginError() {
   const el = document.getElementById('loginError');
