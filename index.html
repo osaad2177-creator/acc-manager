@@ -555,40 +555,19 @@
 <script>
   window._clientsArray = [];
   window._activitiesArray = [];
-  window._usersArray = []; // [{ uid, name, email, role, active }]
   window._currentUser = null; // { uid, name, email, role }
+  window._teamMembers = [];   // [{uid,name,role}] - populated for Manager only, used for assignment dropdown
 </script>
 <script type="module">
   import { app, db, auth } from './firebase-config.js';
   import {
     collection, doc, setDoc, deleteDoc,
-    onSnapshot, addDoc, getDoc,
-    query, orderBy, limit, where
+    onSnapshot, addDoc, getDoc, getDocs,
+    query, where, orderBy, limit
   } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
   import {
-    onAuthStateChanged, signInWithEmailAndPassword, signOut,
-    setPersistence, browserLocalPersistence, browserSessionPersistence, inMemoryPersistence
+    onAuthStateChanged, signInWithEmailAndPassword, signOut
   } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-
-  // ── Persistence: make sure a signed-in session survives a page refresh ────
-  // Firebase defaults to local (IndexedDB) persistence, but that write can
-  // fail silently in some environments — most commonly when this file is
-  // opened directly as file://index.html instead of served over http(s).
-  // We set it explicitly and fall back gracefully instead of failing silent.
-  let authReady = (async () => {
-    try {
-      await setPersistence(auth, browserLocalPersistence);
-    } catch (e) {
-      console.warn('browserLocalPersistence unavailable, falling back to session persistence:', e);
-      try {
-        await setPersistence(auth, browserSessionPersistence);
-      } catch (e2) {
-        console.warn('browserSessionPersistence unavailable either, session will not survive a refresh:', e2);
-        try { await setPersistence(auth, inMemoryPersistence); } catch (e3) { console.error(e3); }
-        if (typeof window.showLoginPersistenceWarning === 'function') window.showLoginPersistenceWarning();
-      }
-    }
-  })();
 
   const clientsCol    = collection(db, "clients");
   const usersCol      = collection(db, "users");
@@ -596,11 +575,9 @@
 
   let unsubClients    = null;
   let unsubActivities = null;
-  let unsubUsers      = null;
 
   // ── Auth: login / logout, exposed to the classic script ────────────────────
   window._fbLogin = async (email, password) => {
-    await authReady;
     return signInWithEmailAndPassword(auth, email, password);
   };
 
@@ -611,37 +588,15 @@
   // ── Firestore helpers, exposed to the classic script ───────────────────────
   window._fbSave = async (client) => {
     fbStatus('sync', '⟳ Saving…');
-    try {
-      const ref = doc(clientsCol, client.id);
-      await setDoc(ref, client);
-      fbStatus('ok', '✓ Saved');
-    } catch (err) {
-      console.error('Save error', err);
-      fbStatus('err', err.code === 'permission-denied' ? '✗ Permission denied' : '✗ Save failed');
-      if (typeof window.showFatalError === 'function') {
-        window.showFatalError(err.code === 'permission-denied'
-          ? 'Could not save — you do not have permission to edit this client.'
-          : 'Could not save. Check your connection and try again.');
-      }
-      throw err;
-    }
+    const ref = doc(clientsCol, client.id);
+    await setDoc(ref, client);
+    fbStatus('ok', '✓ Saved');
   };
 
   window._fbDelete = async (id) => {
     fbStatus('sync', '⟳ Deleting…');
-    try {
-      await deleteDoc(doc(clientsCol, id));
-      fbStatus('ok', '✓ Deleted');
-    } catch (err) {
-      console.error('Delete error', err);
-      fbStatus('err', err.code === 'permission-denied' ? '✗ Permission denied' : '✗ Delete failed');
-      if (typeof window.showFatalError === 'function') {
-        window.showFatalError(err.code === 'permission-denied'
-          ? 'Could not delete — you do not have permission.'
-          : 'Could not delete. Check your connection and try again.');
-      }
-      throw err;
-    }
+    await deleteDoc(doc(clientsCol, id));
+    fbStatus('ok', '✓ Deleted');
   };
 
   window._fbLogActivity = async (activity) => {
@@ -654,14 +609,14 @@
 
   function startClientsListener(user) {
     if (unsubClients) return;
-    // Manager gets every client. A team member's query is scoped to their
-    // own UID at the database level — Firestore + Security Rules guarantee
-    // they never receive another team member's (or unassigned) client data.
-    const q = user.role === 'manager'
+    // Manager reads every client. Team members only ever receive clients
+    // assigned to them — enforced here via the query AND server-side via
+    // Firestore Security Rules (never rely on the frontend alone).
+    const clientsQuery = user.role === 'manager'
       ? clientsCol
       : query(clientsCol, where('assignedTo', '==', user.uid));
 
-    unsubClients = onSnapshot(q, (snap) => {
+    unsubClients = onSnapshot(clientsQuery, (snap) => {
       const incoming = snap.docs.map(d => d.data());
       incoming.sort((a, b) => new Date(b.lastUpdate||0) - new Date(a.lastUpdate||0));
       window._clientsArray.length = 0;
@@ -677,19 +632,10 @@
     });
   }
 
-  function startUsersListener() {
-    if (unsubUsers) return;
-    unsubUsers = onSnapshot(usersCol, (snap) => {
-      window._usersArray.length = 0;
-      snap.docs.forEach(d => window._usersArray.push(d.data()));
-      if (typeof window.onUsersLoaded === 'function') window.onUsersLoaded();
-    }, (err) => console.error('Users listener error', err));
-  }
-
   function startActivitiesListener(user) {
     if (unsubActivities) return;
-    // Manager sees every activity. A team member's query is scoped to
-    // clients assigned to them (enforced by Security Rules too).
+    // Manager reads the full activity log. Team members only ever receive
+    // activity entries tied to clients assigned to them (query + rules).
     try {
       const q = user.role === 'manager'
         ? query(activitiesCol, orderBy('ts', 'desc'), limit(300))
@@ -704,13 +650,25 @@
     } catch (e) { console.error(e); }
   }
 
+  async function loadTeamMembers() {
+    // Manager-only: fetch the (small, fixed) list of team_member profiles
+    // once, to populate the "Assigned To" dropdown and reassignment UI.
+    try {
+      const q = query(usersCol, where('role', '==', 'team_member'));
+      const snap = await getDocs(q);
+      window._teamMembers = snap.docs.map(d => ({ uid: d.id, name: d.data().name || d.id, role: 'team_member' }));
+    } catch (e) {
+      console.error('Load team members error', e);
+      window._teamMembers = [];
+    }
+  }
+
   function stopListeners() {
     if (unsubClients) { unsubClients(); unsubClients = null; }
     if (unsubActivities) { unsubActivities(); unsubActivities = null; }
-    if (unsubUsers) { unsubUsers(); unsubUsers = null; }
     window._clientsArray.length = 0;
     window._activitiesArray.length = 0;
-    window._usersArray.length = 0;
+    window._teamMembers = [];
   }
 
   // ── Auth state watcher: drives login screen vs. app screen ────────────────
@@ -747,9 +705,10 @@
         role: profile.role === 'manager' ? 'manager' : 'team_member'
       };
 
+      if (window._currentUser.role === 'manager') await loadTeamMembers();
+
       startClientsListener(window._currentUser);
       startActivitiesListener(window._currentUser);
-      startUsersListener();
 
       if (typeof window.showAppScreen === 'function') window.showAppScreen();
     } catch (e) {
@@ -849,7 +808,9 @@
     </select>
     <select class="filter-select" id="assignedFilter" style="display:none;" onchange="render()">
       <option value="">Assigned To: All</option>
-      <option value="__unassigned__">Assigned To: Unassigned</option>
+      <option value="Noor">Noor</option>
+      <option value="Hussein">Hussein</option>
+      <option value="__unassigned__">Unassigned</option>
     </select>
     <select class="filter-select" id="sortBy" onchange="render()">
       <option value="lastUpdate">Sort: Last Update</option>
@@ -918,20 +879,6 @@
           <input type="email" class="form-control" id="f_email" placeholder="optional">
         </div>
       </div>
-      <div class="form-row single" id="f_assignedToRow">
-        <div class="form-group">
-          <label>Assigned To</label>
-          <select class="form-control" id="f_assignedTo">
-            <option value="">Unassigned</option>
-          </select>
-        </div>
-      </div>
-      <div class="form-row single" id="f_assignedToReadonlyRow" style="display:none;">
-        <div class="form-group">
-          <label>Assigned To</label>
-          <div class="form-control" style="background:var(--bg);color:var(--text-mid);" id="f_assignedToReadonly">—</div>
-        </div>
-      </div>
     </div>
 
     <div class="form-section">
@@ -960,6 +907,18 @@
             <option>Negotiating</option>
             <option>Won</option>
             <option>Lost</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section" id="assignedToSection" style="display:none;">
+      <div class="form-section-title">Assignment</div>
+      <div class="form-row single">
+        <div class="form-group">
+          <label>Assigned To</label>
+          <select class="form-control" id="f_assignedTo">
+            <option value="">Unassigned</option>
           </select>
         </div>
       </div>
@@ -1043,7 +1002,7 @@
           <option value="updated">Client Updated</option>
           <option value="note">Note Added</option>
           <option value="followup_completed">Follow-up Completed</option>
-          <option value="reassigned">Client Reassigned</option>
+          <option value="reassigned">Reassigned</option>
           <option value="deleted">Client Deleted</option>
         </select>
         <input type="date" class="filter-select" id="activityDateFilter" onchange="renderActivityLog()">
@@ -1117,14 +1076,6 @@ function showLoginError(msg) {
   if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
 }
 
-function showLoginPersistenceWarning() {
-  const el = document.getElementById('loginError');
-  if (!el) return;
-  el.textContent = "Your browser is blocking sign-in storage (private/incognito mode, or the page was opened as a file:// path). You'll need to sign in again after every refresh until this is fixed.";
-  el.classList.add('show');
-}
-window.showLoginPersistenceWarning = showLoginPersistenceWarning;
-
 function hideLoginError() {
   const el = document.getElementById('loginError');
   el.classList.remove('show');
@@ -1178,62 +1129,15 @@ function applyUserToHeader() {
 
 function applyPermissions() {
   const manager = isManager();
-  // Everyone can open the Activity Log now — the data itself is scoped by
-  // Firestore (Manager sees all, team members only see their own clients).
   const activityBtn = document.getElementById('activityLogBtn');
+  // Everyone can open the Activity Log; the data itself is scoped server-side
+  // (Manager sees everything, team members only see activity on their own clients).
   if (activityBtn) activityBtn.style.display = 'inline-flex';
-
-  // The "Assigned To" toolbar filter is only meaningful for the Manager,
-  // since team members only ever receive their own clients anyway.
-  const assignedFilter = document.getElementById('assignedFilter');
-  if (assignedFilter) assignedFilter.style.display = manager ? '' : 'none';
-
-  // Manager filter/edit dropdown row vs. team member's read-only row in the drawer.
-  const pickerRow = document.getElementById('f_assignedToRow');
-  const readonlyRow = document.getElementById('f_assignedToReadonlyRow');
-  if (pickerRow) pickerRow.style.display = manager ? '' : 'none';
-  if (readonlyRow) readonlyRow.style.display = manager ? 'none' : '';
-
-  populateAssignedToControls();
+  const userFilterEl = document.getElementById('activityUserFilter');
+  if (userFilterEl) userFilterEl.style.display = manager ? '' : 'none';
+  const assignedFilterEl = document.getElementById('assignedFilter');
+  if (assignedFilterEl) assignedFilterEl.style.display = manager ? '' : 'none';
 }
-
-// ═══════════════════════════════════════════════
-// TEAM MEMBER LIST (for Manager's Assigned To picker/filter)
-// ═══════════════════════════════════════════════
-
-function teamMembers() {
-  return (window._usersArray || [])
-    .filter(u => u.role === 'team_member' && u.active !== false)
-    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-}
-
-function populateAssignedToControls() {
-  const members = teamMembers();
-
-  // Toolbar filter (Manager only, but harmless to populate regardless).
-  const filterSel = document.getElementById('assignedFilter');
-  if (filterSel) {
-    const current = filterSel.value;
-    filterSel.innerHTML = '<option value="">Assigned To: All</option>' +
-      members.map(m => `<option value="${esc(m.uid)}">Assigned To: ${esc(m.name)}</option>`).join('') +
-      '<option value="__unassigned__">Assigned To: Unassigned</option>';
-    if ([...filterSel.options].some(o => o.value === current)) filterSel.value = current;
-  }
-
-  // Drawer picker (Manager only).
-  const drawerSel = document.getElementById('f_assignedTo');
-  if (drawerSel) {
-    const current = drawerSel.value;
-    drawerSel.innerHTML = '<option value="">Unassigned</option>' +
-      members.map(m => `<option value="${esc(m.uid)}">${esc(m.name)}</option>`).join('');
-    if ([...drawerSel.options].some(o => o.value === current)) drawerSel.value = current;
-  }
-}
-
-window.onUsersLoaded = function() {
-  populateAssignedToControls();
-  render();
-};
 
 function showFatalError(msg) {
   toast(msg);
@@ -1323,8 +1227,8 @@ function getFiltered() {
   const search = document.getElementById('searchInput').value.trim().toLowerCase();
   const statusF = document.getElementById('statusFilter').value;
   const dealF = document.getElementById('dealFilter').value;
+  const assignedF = document.getElementById('assignedFilter').value;
   const sortBy = document.getElementById('sortBy').value;
-  const assignedF = isManager() ? document.getElementById('assignedFilter').value : '';
 
   let list = clients.filter(c => {
     if (search) {
@@ -1333,9 +1237,13 @@ function getFiltered() {
     }
     if (statusF && c.status !== statusF) return false;
     if (dealF && c.deal !== dealF) return false;
-    if (assignedF === '__unassigned__' && c.assignedTo) return false;
-    if (assignedF && assignedF !== '__unassigned__' && c.assignedTo !== assignedF) return false;
-    if (activeStatFilter === 'followups' && !c.followup) return false;
+    if (assignedF) {
+      if (assignedF === '__unassigned__') {
+        if (c.assignedTo) return false;
+      } else if (c.assignedToName !== assignedF) {
+        return false;
+      }
+    }
     return true;
   });
 
@@ -1353,43 +1261,53 @@ function getFiltered() {
 }
 
 function renderStats() {
-  const followupsCount = clients.filter(c => c.followup).length;
-  let stats;
+  const manager = isManager();
+  const grid = document.getElementById('statsGrid');
 
-  if (isManager()) {
-    const members = teamMembers();
-    const unassigned = clients.filter(c => !c.assignedTo).length;
-    stats = [
-      { label: 'Total Clients', num: clients.length, filter: 'all' },
-      ...members.map(m => ({ label: `${m.name} Clients`, num: clients.filter(c => c.assignedTo === m.uid).length, filter: m.uid })),
-      { label: 'Unassigned Clients', num: unassigned, filter: '__unassigned__' },
-      { label: 'Follow-ups', num: followupsCount, filter: 'followups' },
-    ];
-  } else {
-    stats = [
-      { label: 'My Clients', num: clients.length, filter: 'all' },
-      { label: 'My Follow-ups', num: followupsCount, filter: 'followups' },
-    ];
+  if (!manager) {
+    // Team member: their `clients` array is already scoped server-side to their own clients.
+    const total = clients.length;
+    const withFollowup = clients.filter(c => c.followup).length;
+    grid.innerHTML = `
+      <div class="stat-card" style="cursor:default;">
+        <div class="stat-num">${total}</div>
+        <div class="stat-label">My Clients</div>
+      </div>
+      <div class="stat-card" style="cursor:default;">
+        <div class="stat-num">${withFollowup}</div>
+        <div class="stat-label">My Follow-ups</div>
+      </div>`;
+    return;
   }
 
-  document.getElementById('statsGrid').innerHTML = stats.map(s => {
-    const isActive = activeStatFilter === s.filter || (s.filter === 'all' && !activeStatFilter);
-    return `<div class="stat-card${isActive ? ' active' : ''}" data-filter="${s.filter}" onclick="setStatFilter('${s.filter}')">
+  // Manager: sees everyone, so counts are broken down by assignment.
+  const total = clients.length;
+  const noorCount = clients.filter(c => c.assignedToName === 'Noor').length;
+  const husseinCount = clients.filter(c => c.assignedToName === 'Hussein').length;
+  const unassignedCount = clients.filter(c => !c.assignedTo).length;
+  const followups = clients.filter(c => c.followup).length;
+
+  const stats = [
+    { label: 'Total Clients',      num: total,          value: '' },
+    { label: 'Noor Clients',       num: noorCount,       value: 'Noor' },
+    { label: 'Hussein Clients',    num: husseinCount,    value: 'Hussein' },
+    { label: 'Unassigned Clients', num: unassignedCount, value: '__unassigned__' },
+    { label: 'Follow-ups',         num: followups,       value: null },
+  ];
+
+  const curAssigned = document.getElementById('assignedFilter').value;
+  grid.innerHTML = stats.map(s => {
+    const clickable = s.value !== null;
+    const isActive = clickable && curAssigned === s.value;
+    return `<div class="stat-card${isActive ? ' active' : ''}" style="${clickable ? '' : 'cursor:default;'}" ${clickable ? `onclick="setAssignedFilter('${s.value}')"` : ''}>
       <div class="stat-num">${s.num}</div>
       <div class="stat-label">${s.label}</div>
     </div>`;
   }).join('');
 }
 
-// Clicking a stat card sets either the "Assigned To" filter (Manager: a
-// teammate's UID, or Unassigned) or toggles the Follow-ups filter. "Total" /
-// "My Clients" clears both.
-function setStatFilter(f) {
-  activeStatFilter = f === 'all' ? '' : f;
-  if (isManager()) {
-    const sel = document.getElementById('assignedFilter');
-    sel.value = (f === 'followups' || f === 'all') ? '' : f;
-  }
+function setAssignedFilter(value) {
+  document.getElementById('assignedFilter').value = value;
   render();
 }
 
@@ -1469,14 +1387,21 @@ function render() {
 // DRAWER
 // ═══════════════════════════════════════════════
 
+function populateAssignedToSelect(selectedUid) {
+  const sel = document.getElementById('f_assignedTo');
+  const teamMembers = window._teamMembers || [];
+  sel.innerHTML = '<option value="">Unassigned</option>' +
+    teamMembers.map(m => `<option value="${esc(m.uid)}">${esc(m.name)}</option>`).join('');
+  sel.value = selectedUid || '';
+}
+
 function openDrawer(id) {
   document.getElementById('drawerOverlay').classList.add('open');
   document.getElementById('drawer').classList.add('open');
   document.body.style.overflow = 'hidden';
-  populateAssignedToControls();
 
-  const u = currentUser();
   const manager = isManager();
+  document.getElementById('assignedToSection').style.display = manager ? 'block' : 'none';
 
   if (id) {
     const c = clients.find(x => x.id === id);
@@ -1493,8 +1418,7 @@ function openDrawer(id) {
     document.getElementById('f_deal').value = c.deal || 'No Deal Yet';
     document.getElementById('f_followup').value = c.followup || '';
     document.getElementById('f_notes').value = c.notes || '';
-    if (manager) document.getElementById('f_assignedTo').value = c.assignedTo || '';
-    document.getElementById('f_assignedToReadonly').textContent = c.assignedToName || 'Unassigned';
+    if (manager) populateAssignedToSelect(c.assignedTo || '');
   } else {
     document.getElementById('drawerTitle').textContent = 'New Client';
     document.getElementById('editId').value = '';
@@ -1503,10 +1427,7 @@ function openDrawer(id) {
     });
     document.getElementById('f_status').value = 'New';
     document.getElementById('f_deal').value = 'No Deal Yet';
-    // A team member's new client is always assigned to themselves; the
-    // Manager starts a new client Unassigned by default.
-    if (manager) document.getElementById('f_assignedTo').value = '';
-    document.getElementById('f_assignedToReadonly').textContent = u ? u.name : '—';
+    if (manager) populateAssignedToSelect('');
   }
   setTimeout(() => document.getElementById('f_name').focus(), 50);
 }
@@ -1545,15 +1466,17 @@ function saveClient() {
     updatedAt: now(),
   };
 
-  // Who is this client assigned to?
-  //  - Manager picks freely from the "Assigned To" dropdown (or Unassigned).
-  //  - A team member can NEVER choose — new clients are auto-assigned to
-  //    themselves, and they can never reassign an existing one.
+  // ── Assignment ──────────────────────────────────────────────
+  // Only the Manager can choose/change who a client is assigned to.
+  // Team members are always auto-assigned to themselves and cannot
+  // pick another teammate.
   let assignedTo, assignedToName;
   if (manager) {
     const sel = document.getElementById('f_assignedTo');
-    assignedTo = sel.value || null;
-    assignedToName = assignedTo ? (sel.options[sel.selectedIndex].textContent || '') : 'Unassigned';
+    const uid = sel.value;
+    const label = uid ? sel.options[sel.selectedIndex].textContent : '';
+    assignedTo = uid || null;
+    assignedToName = uid ? label : 'Unassigned';
   } else {
     assignedTo = u.uid;
     assignedToName = u.name;
@@ -1567,21 +1490,31 @@ function saveClient() {
       assignedTo, assignedToName,
     };
     client.history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'created', text: 'Client added.' });
+    if (manager && assignedTo) {
+      client.history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'assigned', text: `Assigned to ${assignedToName}.` });
+    }
     clients.unshift(client);
     savedClient = client;
     toast('Client added ✓');
-    logActivity('created', client.id, client.name, `Added client ${client.name}${client.company ? ' (' + client.company + ')' : ''}.`, assignedTo);
+    logActivity('created', client.id, client.name, `Added client ${client.name}${client.company ? ' (' + client.company + ')' : ''}.`, assignedTo, assignedToName);
   } else {
     const idx = clients.findIndex(c => c.id === id);
     if (idx === -1) return;
     const old = clients[idx];
+
+    // Team members may only edit clients already assigned to them.
+    // (Also enforced server-side by Firestore Security Rules.)
+    if (!manager && old.assignedTo !== u.uid) {
+      toast("You can only edit your own clients.");
+      return;
+    }
+
     const changes = [];
     if (old.status !== data.status) changes.push(`Status → ${data.status}`);
     if (old.deal !== data.deal) changes.push(`Deal → ${data.deal}`);
     if (old.followup !== data.followup && data.followup) changes.push(`Follow-up set: ${fmtDate(data.followup+'T00:00:00')}`);
 
-    // Only the Manager can change the assignment; team members' edits keep
-    // the client's existing assignedTo/assignedToName untouched.
+    // Non-managers can never change assignment — keep the existing value.
     const finalAssignedTo = manager ? assignedTo : old.assignedTo;
     const finalAssignedToName = manager ? assignedToName : old.assignedToName;
     const reassigned = manager && (finalAssignedTo || null) !== (old.assignedTo || null);
@@ -1592,6 +1525,7 @@ function saveClient() {
       createdBy: old.createdBy, createdByName: old.createdByName, createdAt: old.createdAt,
       assignedTo: finalAssignedTo, assignedToName: finalAssignedToName,
     };
+
     clients[idx].history = clients[idx].history || [];
     if (changes.length) {
       clients[idx].history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'updated', text: changes.join(' · ') });
@@ -1604,11 +1538,12 @@ function saveClient() {
         text: `Manager reassigned ${clients[idx].name} from ${fromName} to ${toName}.`
       });
     }
+
     savedClient = clients[idx];
     toast('Client updated ✓');
-    logActivity('updated', savedClient.id, savedClient.name, changes.length ? `Updated ${savedClient.name}: ${changes.join(' · ')}` : `Updated ${savedClient.name}.`, finalAssignedTo);
+    logActivity('updated', savedClient.id, savedClient.name, changes.length ? `Updated ${savedClient.name}: ${changes.join(' · ')}` : `Updated ${savedClient.name}.`, finalAssignedTo, finalAssignedToName);
     if (reassigned) {
-      logActivity('reassigned', savedClient.id, savedClient.name, `Reassigned ${savedClient.name} from ${old.assignedToName || 'Unassigned'} to ${finalAssignedToName || 'Unassigned'}.`, finalAssignedTo);
+      logActivity('reassigned', savedClient.id, savedClient.name, `Reassigned ${savedClient.name} from ${old.assignedToName || 'Unassigned'} to ${finalAssignedToName || 'Unassigned'}.`, finalAssignedTo, finalAssignedToName);
     }
   }
 
@@ -1622,7 +1557,7 @@ function saveClient() {
 // ACTIVITY LOG (write side)
 // ═══════════════════════════════════════════════
 
-function logActivity(action, clientId, clientName, text, assignedTo) {
+function logActivity(action, clientId, clientName, text, assignedTo, assignedToName) {
   const u = currentUser();
   if (!u || !window._fbLogActivity) return;
   window._fbLogActivity({
@@ -1634,6 +1569,7 @@ function logActivity(action, clientId, clientName, text, assignedTo) {
     clientName: clientName || '',
     text,
     assignedTo: assignedTo || null,
+    assignedToName: assignedToName || 'Unassigned',
     ts: Date.now(),
   }).catch(console.error);
 }
@@ -1685,6 +1621,7 @@ function addHistoryNote() {
   if (!u) { toast('You must be signed in.'); return; }
   const idx = clients.findIndex(c => c.id === currentHistoryId);
   if (idx === -1) return;
+  if (!isManager() && clients[idx].assignedTo !== u.uid) { toast('You can only update your own clients.'); return; }
   clients[idx].history = clients[idx].history || [];
   clients[idx].history.push({ ts: now(), userId: u.uid, userName: u.name, action: 'note', text });
   clients[idx].lastUpdate = now();
@@ -1696,7 +1633,7 @@ function addHistoryNote() {
   renderHistoryList(clients[idx]);
   render();
   toast('Note added ✓');
-  logActivity('note', clients[idx].id, clients[idx].name, `Note on ${clients[idx].name}: ${text}`, clients[idx].assignedTo);
+  logActivity('note', clients[idx].id, clients[idx].name, `Note on ${clients[idx].name}: ${text}`, clients[idx].assignedTo, clients[idx].assignedToName);
 }
 
 function markFollowupDone() {
@@ -1704,6 +1641,7 @@ function markFollowupDone() {
   if (!u) { toast('You must be signed in.'); return; }
   const idx = clients.findIndex(c => c.id === currentHistoryId);
   if (idx === -1) return;
+  if (!isManager() && clients[idx].assignedTo !== u.uid) { toast('You can only update your own clients.'); return; }
   const old = clients[idx].followup;
   clients[idx].followup = '';
   clients[idx].lastUpdate = now();
@@ -1718,7 +1656,7 @@ function markFollowupDone() {
   renderHistoryList(clients[idx]);
   render();
   toast('Follow-up marked done ✓');
-  logActivity('followup_completed', clients[idx].id, clients[idx].name, `Marked follow-up done for ${clients[idx].name}.`, clients[idx].assignedTo);
+  logActivity('followup_completed', clients[idx].id, clients[idx].name, `Marked follow-up done for ${clients[idx].name}.`, clients[idx].assignedTo, clients[idx].assignedToName);
 }
 
 function closeHistory(e) {
@@ -1759,7 +1697,7 @@ function confirmDelete() {
   closeConfirm();
   render();
   toast('Client deleted');
-  if (target) logActivity('deleted', idToDelete, target.name, `Deleted client ${target.name}.`, target.assignedTo);
+  if (target) logActivity('deleted', idToDelete, target.name, `Deleted client ${target.name}.`, target.assignedTo, target.assignedToName);
 }
 
 // ═══════════════════════════════════════════════
@@ -1769,10 +1707,10 @@ function confirmDelete() {
 function exportData() {
   if (clients.length === 0) { toast('No data to export'); return; }
 
-  const headers = ['Name','Company','Contact','Phone','Email','Request','Status','Deal Status','Follow-up Date','Last Update','Notes'];
+  const headers = ['Name','Company','Contact','Phone','Email','Request','Status','Deal Status','Assigned To','Follow-up Date','Last Update','Notes'];
   const rows = clients.map(c => [
     c.name, c.company, c.contact, c.phone, c.email,
-    c.request, c.status, c.deal, c.followup,
+    c.request, c.status, c.deal, c.assignedToName || 'Unassigned', c.followup,
     c.lastUpdate ? new Date(c.lastUpdate).toLocaleDateString('en-GB') : '',
     c.notes
   ]);
@@ -1792,7 +1730,7 @@ function exportData() {
 }
 
 // ═══════════════════════════════════════════════
-// ACTIVITY LOG (read / UI side, Manager only)
+// ACTIVITY LOG (read / UI side — scoped per role server-side)
 // ═══════════════════════════════════════════════
 
 function openActivityLog() {
@@ -1812,8 +1750,8 @@ const ACTION_LABELS = {
   updated: 'updated',
   note: 'added a note on',
   followup_completed: 'completed follow-up for',
-  deleted: 'deleted client',
   reassigned: 'reassigned',
+  deleted: 'deleted client',
 };
 
 function renderActivityLog() {
