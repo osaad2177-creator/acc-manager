@@ -808,8 +808,9 @@
     </select>
     <select class="filter-select" id="assignedFilter" style="display:none;" onchange="render()">
       <option value="">Assigned To: All</option>
-      <option value="Noor">Noor</option>
-      <option value="Hussein">Hussein</option>
+      <!-- Team member options (Noor, Hussein, Saif, ...) are injected dynamically
+           by populateAssignedFilterOptions() from the live `users` collection,
+           so adding a new team member never requires an HTML/code change. -->
       <option value="__unassigned__">Unassigned</option>
     </select>
     <select class="filter-select" id="sortBy" onchange="render()">
@@ -993,8 +994,8 @@
         <select class="filter-select" id="activityUserFilter" onchange="renderActivityLog()">
           <option value="">All Users</option>
           <option value="Manager">Manager</option>
-          <option value="Noor">Noor</option>
-          <option value="Hussein">Hussein</option>
+          <!-- Team member options (Noor, Hussein, Saif, ...) are injected dynamically
+               by populateActivityUserFilterOptions() from the live `users` collection. -->
         </select>
         <select class="filter-select" id="activityActionFilter" onchange="renderActivityLog()">
           <option value="">All Actions</option>
@@ -1137,6 +1138,38 @@ function applyPermissions() {
   if (userFilterEl) userFilterEl.style.display = manager ? '' : 'none';
   const assignedFilterEl = document.getElementById('assignedFilter');
   if (assignedFilterEl) assignedFilterEl.style.display = manager ? '' : 'none';
+
+  if (manager) {
+    populateAssignedFilterOptions();
+    populateActivityUserFilterOptions();
+  }
+}
+
+// Manager-only "Assigned To" table filter (All / each team member / Unassigned).
+// Built from window._teamMembers (loaded from the `users` collection where
+// role == "team_member") instead of a hardcoded name list, so adding a new
+// team member (e.g. Saif) in Firestore is enough — no code change needed.
+function populateAssignedFilterOptions() {
+  const sel = document.getElementById('assignedFilter');
+  if (!sel) return;
+  const current = sel.value;
+  const teamMembers = window._teamMembers || [];
+  sel.innerHTML = '<option value="">Assigned To: All</option>' +
+    teamMembers.map(m => `<option value="${esc(m.name)}">${esc(m.name)}</option>`).join('') +
+    '<option value="__unassigned__">Unassigned</option>';
+  // Preserve the current selection if it still exists (e.g. re-populated after a live users update).
+  if ([...sel.options].some(o => o.value === current)) sel.value = current;
+}
+
+// Manager-only Activity Log "All Users" filter (Manager + each team member).
+function populateActivityUserFilterOptions() {
+  const sel = document.getElementById('activityUserFilter');
+  if (!sel) return;
+  const current = sel.value;
+  const teamMembers = window._teamMembers || [];
+  sel.innerHTML = '<option value="">All Users</option><option value="Manager">Manager</option>' +
+    teamMembers.map(m => `<option value="${esc(m.name)}">${esc(m.name)}</option>`).join('');
+  if ([...sel.options].some(o => o.value === current)) sel.value = current;
 }
 
 function showFatalError(msg) {
@@ -1281,16 +1314,21 @@ function renderStats() {
   }
 
   // Manager: sees everyone, so counts are broken down by assignment.
+  // Built from window._teamMembers (the live `users` collection) rather than
+  // a hardcoded name list, so Saif — or anyone added later — gets a stat
+  // card automatically.
   const total = clients.length;
-  const noorCount = clients.filter(c => c.assignedToName === 'Noor').length;
-  const husseinCount = clients.filter(c => c.assignedToName === 'Hussein').length;
+  const teamMembers = window._teamMembers || [];
   const unassignedCount = clients.filter(c => !c.assignedTo).length;
   const followups = clients.filter(c => c.followup).length;
 
   const stats = [
-    { label: 'Total Clients',      num: total,          value: '' },
-    { label: 'Noor Clients',       num: noorCount,       value: 'Noor' },
-    { label: 'Hussein Clients',    num: husseinCount,    value: 'Hussein' },
+    { label: 'Total Clients', num: total, value: '' },
+    ...teamMembers.map(m => ({
+      label: `${m.name} Clients`,
+      num: clients.filter(c => c.assignedToName === m.name).length,
+      value: m.name
+    })),
     { label: 'Unassigned Clients', num: unassignedCount, value: '__unassigned__' },
     { label: 'Follow-ups',         num: followups,       value: null },
   ];
